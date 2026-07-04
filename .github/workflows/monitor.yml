@@ -2,7 +2,7 @@ name: Ticket Price Monitor
 
 on:
   schedule:
-    - cron: "*/30 * * * *"   # every 30 minutes (GitHub may delay this slightly under load)
+    - cron: "*/5 * * * *"   # every 5 minutes (GitHub may delay this slightly under load)
   workflow_dispatch:          # lets you click "Run workflow" manually to test
 
 permissions:
