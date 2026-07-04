@@ -1,11 +1,16 @@
 """
-Simple Ticketmaster price monitor.
-Checks the event's lowest price via Ticketmaster's free Discovery API,
-and sends a notification (email + Telegram) whenever:
-  - the price hits $0.00, OR
-  - the price drops below the last price we already notified about.
+Ticketmaster price monitor - keyword/search based.
 
-All secrets are read from environment variables (set as GitHub Actions secrets).
+Instead of watching a single hardcoded event ID (each date of a recurring
+event like a festival has its own separate ID, and IDs from the public URL
+don't always match the Discovery API's internal ID), this version searches
+by keyword every run and checks EVERY upcoming date it finds.
+
+It notifies (email + Telegram) for any date where:
+  - the price hits $0.00, OR
+  - the price drops below the last price we already notified about for that date
+
+State (what we've already notified about, per event date) is stored in state.json.
 """
 
 import os
@@ -15,8 +20,7 @@ import smtplib
 from email.mime.text import MIMEText
 
 # ---- Config ----
-EVENT_ID = "10006496902A8B6C"  # taken from your Ticketmaster URL
-EVENT_URL = "https://www.ticketmaster.ca/fifa-fan-festival-toronto-toronto-ontario-07-04-2026/event/10006496902A8B6C"
+KEYWORD = "FIFA Fan Festival Toronto"
 STATE_FILE = "state.json"
 
 TM_API_KEY = os.environ.get("TM_API_KEY")
@@ -27,30 +31,27 @@ GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD")
 NOTIFY_EMAIL = os.environ.get("NOTIFY_EMAIL")
 
 
-def get_price():
-    """Ask Ticketmaster's official API for the current price range."""
-    url = f"https://app.ticketmaster.com/discovery/v2/events/{EVENT_ID}.json"
-    resp = requests.get(url, params={"apikey": TM_API_KEY}, timeout=20)
+def search_events():
+    """Search Ticketmaster for all upcoming events matching the keyword."""
+    url = "https://app.ticketmaster.com/discovery/v2/events.json"
+    params = {"apikey": TM_API_KEY, "keyword": KEYWORD, "size": 50}
+    resp = requests.get(url, params=params, timeout=20)
     resp.raise_for_status()
     data = resp.json()
-    price_ranges = data.get("priceRanges", [])
-    if not price_ranges:
-        return None, None
-    min_price = min(p["min"] for p in price_ranges)
-    currency = price_ranges[0].get("currency", "CAD")
-    return min_price, currency
+    return data.get("_embedded", {}).get("events", [])
 
 
 def load_state():
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE) as f:
-            return json.load(f)
-    return {"lowest_notified": None}
+            content = f.read().strip()
+            return json.loads(content) if content else {}
+    return {}
 
 
 def save_state(state):
     with open(STATE_FILE, "w") as f:
-        json.dump(state, f)
+        json.dump(state, f, indent=2)
 
 
 def send_email(subject, body):
@@ -80,34 +81,42 @@ def main():
     if not TM_API_KEY:
         raise SystemExit("Missing TM_API_KEY environment variable / secret.")
 
-    min_price, currency = get_price()
+    events = search_events()
+    print(f"Found {len(events)} matching events.")
 
-    if min_price is None:
-        print("No price data available right now (tickets may not be on sale yet).")
-        return
+    state = load_state()  # dict: {event_id: last_notified_price}
 
-    state = load_state()
-    last_notified = state.get("lowest_notified")
-    print(f"Current lowest price: {min_price} {currency} (last notified: {last_notified})")
+    for ev in events:
+        event_id = ev.get("id")
+        name = ev.get("name", KEYWORD)
+        date = ev.get("dates", {}).get("start", {}).get("localDate", "unknown date")
+        event_url = ev.get("url", "")
+        price_ranges = ev.get("priceRanges", [])
 
-    should_notify = False
-    if min_price == 0:
-        should_notify = last_notified != 0
-    elif last_notified is None or min_price < last_notified:
-        should_notify = True
+        if not price_ranges:
+            print(f"{date} ({event_id}): no price data yet.")
+            continue
 
-    if should_notify:
-        subject = f"Ticket price alert: now {min_price} {currency}"
-        body = (
-            f"The lowest available price for the FIFA Fan Festival Toronto event "
-            f"is now {min_price} {currency}.\n\n{EVENT_URL}"
-        )
-        send_email(subject, body)
-        send_telegram(f"{subject}\n{body}")
-        state["lowest_notified"] = min_price
-        save_state(state)
-    else:
-        print("No notification needed this run.")
+        min_price = min(p["min"] for p in price_ranges)
+        currency = price_ranges[0].get("currency", "CAD")
+        last_notified = state.get(event_id)
+
+        print(f"{date} ({event_id}): lowest price {min_price} {currency} (last notified: {last_notified})")
+
+        should_notify = False
+        if min_price == 0:
+            should_notify = last_notified != 0
+        elif last_notified is None or min_price < last_notified:
+            should_notify = True
+
+        if should_notify:
+            subject = f"Ticket price alert: {name} {date} now {min_price} {currency}"
+            body = f"{name}\nDate: {date}\nLowest price: {min_price} {currency}\n\n{event_url}"
+            send_email(subject, body)
+            send_telegram(f"{subject}\n{body}")
+            state[event_id] = min_price
+
+    save_state(state)
 
 
 if __name__ == "__main__":
