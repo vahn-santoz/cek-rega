@@ -1,9 +1,9 @@
 name: Ticket Price Monitor
 
 on:
-  schedule:
-    - cron: "*/5 * * * *"   # every 5 minutes (GitHub may delay this slightly under load)
   workflow_dispatch:          # lets you click "Run workflow" manually to test
+  repository_dispatch:        # cron-job.org pings this every 5 minutes - this is the real schedule now
+    types: [check-price]
 
 permissions:
   contents: write            # needed so the workflow can commit state.json back
