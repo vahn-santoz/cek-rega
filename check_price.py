@@ -1,16 +1,14 @@
 """
 Ticketmaster price monitor - keyword/search based.
 
-Instead of watching a single hardcoded event ID (each date of a recurring
-event like a festival has its own separate ID, and IDs from the public URL
-don't always match the Discovery API's internal ID), this version searches
-by keyword every run and checks EVERY upcoming date it finds.
+Searches by keyword every run and checks EVERY upcoming date it finds.
 
-It notifies (email + Telegram) for any date where:
-  - the price hits $0.00, OR
-  - the price drops below the last price we already notified about for that date
+Notifies (email + Telegram) whenever, for any date:
+  - the price transitions TO $0.00 (even if it was $0 before, went away, and came back), OR
+  - the price drops below the last price we saw for that date
 
-State (what we've already notified about, per event date) is stored in state.json.
+State (the last price we SAW, per event date - not just the last one we notified
+about) is stored in state.json, so re-openings after a sellout are caught correctly.
 """
 
 import os
@@ -74,7 +72,7 @@ def send_telegram(text):
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     r = requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": text}, timeout=20)
-    print("Telegram response:", r.status_code)
+    print("Telegram response:", r.status_code, r.text[:200])
 
 
 def main():
@@ -84,7 +82,7 @@ def main():
     events = search_events()
     print(f"Found {len(events)} matching events.")
 
-    state = load_state()  # dict: {event_id: last_notified_price}
+    state = load_state()  # dict: {event_id: {"last_price": ...}}
 
     for ev in events:
         event_id = ev.get("id")
@@ -99,14 +97,18 @@ def main():
 
         min_price = min(p["min"] for p in price_ranges)
         currency = price_ranges[0].get("currency", "CAD")
-        last_notified = state.get(event_id)
 
-        print(f"{date} ({event_id}): lowest price {min_price} {currency} (last notified: {last_notified})")
+        prev = state.get(event_id, {})
+        last_price = prev.get("last_price")
+
+        print(f"{date} ({event_id}): lowest price {min_price} {currency} (last seen: {last_price})")
 
         should_notify = False
         if min_price == 0:
-            should_notify = last_notified != 0
-        elif last_notified is None or min_price < last_notified:
+            # Notify every time it transitions INTO $0 - including re-openings
+            # after a sellout, not just the very first time ever.
+            should_notify = last_price != 0
+        elif last_price is None or min_price < last_price:
             should_notify = True
 
         if should_notify:
@@ -114,7 +116,10 @@ def main():
             body = f"{name}\nDate: {date}\nLowest price: {min_price} {currency}\n\n{event_url}"
             send_email(subject, body)
             send_telegram(f"{subject}\n{body}")
-            state[event_id] = min_price
+
+        # Always record what we saw this run, regardless of whether we notified,
+        # so we can correctly detect the NEXT transition (e.g. sellout then reopen).
+        state[event_id] = {"last_price": min_price}
 
     save_state(state)
 
